@@ -651,7 +651,11 @@ mod tests {
 
         assert_eq!(events.len(), 15);
         assert_eq!(authors.len(), 4);
-        assert!(events.iter().any(|event| event.tags.as_slice() == ["v0.1.0"]));
+        assert!(
+            events
+                .iter()
+                .any(|event| event.tags.as_slice() == ["v0.1.0"])
+        );
     }
 
     #[test]
