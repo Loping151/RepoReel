@@ -331,6 +331,9 @@ fn render_player_frame(
         layout,
         authors,
         PULSE_EVENT_COUNT,
+        &paths.0,
+        &paths.1,
+        false,
     );
     let hot_files = hot_files_from_events(player.events_up_to_cursor(), None, HOT_FILE_LIMIT);
     let node_details = node_details_from_events(player.events_up_to_cursor(), layout);

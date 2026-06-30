@@ -170,17 +170,22 @@ pub fn build_pulses(
     layout: &Layout,
     authors: &[AuthorInfo],
     recent_event_count: usize,
+    visible_paths: &HashSet<PathBuf>,
+    active_paths: &HashSet<PathBuf>,
+    nav_mode: bool,
 ) -> Vec<Pulse> {
     if recent_event_count == 0 || authors.is_empty() {
         return Vec::new();
     }
 
+    let graph = render_graph_from_parts(layout, visible_paths, active_paths, nav_mode);
     let author_index = authors
         .iter()
         .enumerate()
         .map(|(index, author)| (author.key.as_str(), index))
         .collect::<HashMap<_, _>>();
 
+    let graph = &graph;
     events
         .iter()
         .rev()
@@ -193,7 +198,9 @@ pub fn build_pulses(
                 .unwrap_or((0.5, 0.03));
             let progress = (0.16 + age as f64 * 0.18).clamp(0.0, 0.96);
             event.changes.iter().filter_map(move |change| {
-                let node = pulse_target_node(layout, &change.path)?;
+                // Pulse y is normalized only against rendered nodes, so hidden targets must resolve
+                // to a rendered ancestor before a pulse is allowed to exist.
+                let node = pulse_target_node(layout, graph, &change.path)?;
                 Some(Pulse {
                     from,
                     to: (node.x, node.y),
@@ -506,7 +513,7 @@ fn draw_tree(scene: &SceneState, area: Rect, buf: &mut Buffer) {
     let y_projection = VisibleYProjection::from_graph(scene, &graph);
     draw_links(scene, area, buf, &graph, &heat_scale, y_projection);
     draw_nodes(scene, area, buf, &graph, &heat_scale, y_projection);
-    draw_pulses(scene, area, buf, y_projection);
+    draw_pulses(scene, area, buf, &graph, y_projection);
     draw_nav_cursor(scene, area, buf, y_projection);
     draw_diff_popup(scene, area, buf, y_projection);
 }
@@ -553,18 +560,30 @@ impl VisibleYProjection {
 }
 
 fn render_graph(scene: &SceneState) -> RenderGraph {
+    render_graph_from_parts(
+        &scene.layout,
+        &scene.visible_paths,
+        &scene.active_paths,
+        scene.nav_mode,
+    )
+}
+
+fn render_graph_from_parts(
+    layout: &Layout,
+    visible_paths: &HashSet<PathBuf>,
+    active_paths: &HashSet<PathBuf>,
+    nav_mode: bool,
+) -> RenderGraph {
     const EXPANDED_DIR_LIMIT: usize = 8;
 
-    if scene.nav_mode {
-        let visible_dirs = scene
-            .layout
+    if nav_mode {
+        let visible_dirs = layout
             .nodes
             .iter()
             .enumerate()
             .filter_map(|(index, node)| node.is_dir.then_some(index))
             .collect::<HashSet<_>>();
-        let visible_files = scene
-            .layout
+        let visible_files = layout
             .nodes
             .iter()
             .enumerate()
@@ -580,18 +599,18 @@ fn render_graph(scene: &SceneState) -> RenderGraph {
 
     let mut visible_dirs = HashSet::new();
     let mut active_dirs = HashSet::new();
-    for path in scene.visible_paths.iter().chain(scene.active_paths.iter()) {
-        let Some(index) = scene.layout.by_path.get(path).copied() else {
+    for path in visible_paths.iter().chain(active_paths.iter()) {
+        let Some(index) = layout.by_path.get(path).copied() else {
             continue;
         };
 
-        if scene.layout.nodes[index].is_dir {
+        if layout.nodes[index].is_dir {
             visible_dirs.insert(index);
         }
         let mut parent = parent_path(path);
         while let Some(path) = parent {
-            if let Some(parent_index) = scene.layout.by_path.get(&path).copied()
-                && scene.layout.nodes[parent_index].is_dir
+            if let Some(parent_index) = layout.by_path.get(&path).copied()
+                && layout.nodes[parent_index].is_dir
             {
                 visible_dirs.insert(parent_index);
             }
@@ -599,11 +618,11 @@ fn render_graph(scene: &SceneState) -> RenderGraph {
         }
     }
 
-    for path in &scene.active_paths {
+    for path in active_paths {
         let mut parent = Some(path.as_path());
         while let Some(path) = parent {
-            if let Some(index) = scene.layout.by_path.get(path).copied()
-                && scene.layout.nodes[index].is_dir
+            if let Some(index) = layout.by_path.get(path).copied()
+                && layout.nodes[index].is_dir
             {
                 active_dirs.insert(index);
             }
@@ -615,8 +634,8 @@ fn render_graph(scene: &SceneState) -> RenderGraph {
 
     let mut hot_dirs = visible_dirs.iter().copied().collect::<Vec<_>>();
     hot_dirs.sort_by(|left, right| {
-        let left_node = &scene.layout.nodes[*left];
-        let right_node = &scene.layout.nodes[*right];
+        let left_node = &layout.nodes[*left];
+        let right_node = &layout.nodes[*right];
         right_node
             .heat
             .cmp(&left_node.heat)
@@ -626,15 +645,15 @@ fn render_graph(scene: &SceneState) -> RenderGraph {
     let expanded_dirs = hot_dirs.into_iter().collect::<HashSet<_>>();
 
     let mut visible_files = HashSet::new();
-    for path in scene.visible_paths.iter().chain(scene.active_paths.iter()) {
-        let Some(index) = scene.layout.by_path.get(path).copied() else {
+    for path in visible_paths.iter().chain(active_paths.iter()) {
+        let Some(index) = layout.by_path.get(path).copied() else {
             continue;
         };
-        if scene.layout.nodes[index].is_dir {
+        if layout.nodes[index].is_dir {
             continue;
         }
         if let Some(parent) = parent_path(path)
-            && let Some(parent_index) = scene.layout.by_path.get(&parent).copied()
+            && let Some(parent_index) = layout.by_path.get(&parent).copied()
             && expanded_dirs.contains(&parent_index)
         {
             visible_files.insert(index);
@@ -774,8 +793,17 @@ fn draw_nodes(
     }
 }
 
-fn draw_pulses(scene: &SceneState, area: Rect, buf: &mut Buffer, y_projection: VisibleYProjection) {
+fn draw_pulses(
+    scene: &SceneState,
+    area: Rect,
+    buf: &mut Buffer,
+    graph: &RenderGraph,
+    y_projection: VisibleYProjection,
+) {
     for pulse in &scene.pulses {
+        if !pulse_target_is_visible(scene, graph, pulse.to) {
+            continue;
+        }
         let progress = pulse.progress.clamp(0.0, 1.0);
         let Some(from) = map_point(area, pulse.from.0, pulse.from.1) else {
             continue;
@@ -846,6 +874,17 @@ fn draw_pulses(scene: &SceneState, area: Rect, buf: &mut Buffer, y_projection: V
             );
         }
     }
+}
+
+fn pulse_target_is_visible(scene: &SceneState, graph: &RenderGraph, target: (f64, f64)) -> bool {
+    graph
+        .visible_dirs
+        .iter()
+        .chain(graph.visible_files.iter())
+        .filter_map(|index| scene.layout.nodes.get(*index))
+        .any(|node| {
+            (node.x - target.0).abs() <= f64::EPSILON && (node.y - target.1).abs() <= f64::EPSILON
+        })
 }
 
 fn draw_nav_cursor(
@@ -1977,22 +2016,32 @@ fn side_width(width: u16, tree_height: u16) -> Option<u16> {
     Some(desired)
 }
 
-fn pulse_target_node<'a>(layout: &'a Layout, path: &Path) -> Option<&'a crate::layout::LayoutNode> {
+fn pulse_target_node<'a>(
+    layout: &'a Layout,
+    graph: &RenderGraph,
+    path: &Path,
+) -> Option<&'a crate::layout::LayoutNode> {
     let mut current = parent_path(path);
     while let Some(path) = current {
         if let Some(index) = layout.by_path.get(&path).copied()
             && let Some(node) = layout.nodes.get(index)
             && node.is_dir
+            && graph.visible_dirs.contains(&index)
         {
             return Some(node);
         }
         current = parent_path(&path);
     }
 
-    layout
-        .by_path
-        .get(path)
-        .and_then(|index| layout.nodes.get(*index))
+    layout.by_path.get(path).and_then(|index| {
+        let node = layout.nodes.get(*index)?;
+        let visible = if node.is_dir {
+            graph.visible_dirs.contains(index)
+        } else {
+            graph.visible_files.contains(index)
+        };
+        visible.then_some(node)
+    })
 }
 
 fn display_path(path: &Path, width: u16) -> String {
@@ -2055,13 +2104,17 @@ fn draw_progress_bar(scene: &SceneState, area: Rect, buf: &mut Buffer) {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, path::PathBuf};
+    use std::{
+        collections::{HashMap, HashSet},
+        path::PathBuf,
+    };
 
     use chrono::{TimeZone, Utc};
     use ratatui::style::Color;
 
     use super::*;
     use crate::diff::FileDiff;
+    use crate::ir::{Author, ChangeKind, FileChange, RepoId};
     use crate::layout::LayoutNode;
 
     fn scene_with_paths(paths: &[(&str, bool)]) -> SceneState {
@@ -2165,6 +2218,83 @@ mod tests {
     }
 
     #[test]
+    fn build_pulses_targets_visible_ancestor_for_hidden_nodes() {
+        let scene = scene_with_paths(&[
+            ("src", true),
+            ("src/visible.rs", false),
+            ("src/hidden", true),
+            ("src/hidden/deep.rs", false),
+        ]);
+        let visible_paths = HashSet::from([PathBuf::from("src/visible.rs")]);
+        let active_paths = HashSet::new();
+        let events = vec![history_event("src/hidden/deep.rs")];
+        let authors = vec![author_info()];
+
+        let pulses = build_pulses(
+            &events,
+            &scene.layout,
+            &authors,
+            1,
+            &visible_paths,
+            &active_paths,
+            false,
+        );
+
+        let src = &scene.layout.nodes[scene.layout.by_path[&PathBuf::from("src")]];
+        assert_eq!(pulses.len(), 1);
+        assert_eq!(pulses[0].to, (src.x, src.y));
+    }
+
+    #[test]
+    fn build_pulses_skips_targets_without_visible_ancestor() {
+        let scene = scene_with_paths(&[
+            ("other", true),
+            ("other/visible.rs", false),
+            ("hidden", true),
+            ("hidden/deep.rs", false),
+        ]);
+        let visible_paths = HashSet::from([PathBuf::from("other/visible.rs")]);
+        let active_paths = HashSet::new();
+        let events = vec![history_event("hidden/deep.rs")];
+        let authors = vec![author_info()];
+
+        let pulses = build_pulses(
+            &events,
+            &scene.layout,
+            &authors,
+            1,
+            &visible_paths,
+            &active_paths,
+            false,
+        );
+
+        assert!(pulses.is_empty());
+    }
+
+    #[test]
+    fn draw_scene_skips_stale_pulses_to_hidden_targets() {
+        let mut scene = scene_with_paths(&[
+            ("other", true),
+            ("other/visible.rs", false),
+            ("hidden", true),
+            ("hidden/deep.rs", false),
+        ]);
+        scene.visible_paths = HashSet::from([PathBuf::from("other/visible.rs")]);
+        let hidden = &scene.layout.nodes[scene.layout.by_path[&PathBuf::from("hidden")]];
+        scene.pulses = vec![Pulse {
+            from: (0.5, 0.03),
+            to: (hidden.x, hidden.y),
+            progress: 0.96,
+        }];
+        let area = Rect::new(0, 0, 60, 14);
+        let mut buf = Buffer::empty(area);
+
+        draw_scene_to_buffer(&scene, area, &mut buf);
+
+        assert!(!has_cell_with_fg(&buf, area, Color::LightYellow));
+    }
+
+    #[test]
     fn diff_lines_render_added_and_removed_styles() {
         let diff = FileDiff {
             commit_oid: "abcdef123456".to_string(),
@@ -2239,5 +2369,32 @@ mod tests {
             (area.x..area.x.saturating_add(area.width))
                 .any(|x| buf[(x, y)].style().fg == Some(color))
         })
+    }
+
+    fn author_info() -> AuthorInfo {
+        AuthorInfo {
+            key: "ada@example.com".to_string(),
+            label: "Ada".to_string(),
+            commits: 1,
+        }
+    }
+
+    fn history_event(path: &str) -> HistoryEvent {
+        let timestamp = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        HistoryEvent {
+            repo: RepoId::new("fixture"),
+            commit_oid: "abcdef123456".to_string(),
+            author: Author::normalized("Ada", "ada@example.com"),
+            author_time: timestamp,
+            commit_time: timestamp,
+            changes: vec![FileChange {
+                path: PathBuf::from(path),
+                kind: ChangeKind::Modify,
+                lines_added: 1,
+                lines_deleted: 0,
+            }],
+            message: "change".to_string(),
+            tags: Vec::new(),
+        }
     }
 }

@@ -654,6 +654,9 @@ fn draw_play_frame(
         layout,
         authors,
         PULSE_EVENT_COUNT,
+        &paths.visible_paths,
+        &paths.active_paths,
+        nav_mode,
     );
     let hot_files = hot_files_from_events(player.events_up_to_cursor(), focus_key, HOT_FILE_LIMIT);
     let scene = SceneState {
