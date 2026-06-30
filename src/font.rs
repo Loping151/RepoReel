@@ -328,8 +328,8 @@ mod tests {
 
         render_char('R', fg, bg, &mut out, 12, 20);
 
-        assert!(out.iter().any(|pixel| *pixel == fg));
-        assert!(out.iter().any(|pixel| *pixel == bg));
+        assert!(out.contains(&fg));
+        assert!(out.contains(&bg));
     }
 
     #[test]
@@ -341,7 +341,7 @@ mod tests {
 
             render_char(ch, fg, bg, &mut out, 12, 20);
 
-            assert!(out.iter().any(|pixel| *pixel == fg), "{ch}");
+            assert!(out.contains(&fg), "{ch}");
         }
     }
 }

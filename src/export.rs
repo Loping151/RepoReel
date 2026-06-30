@@ -651,7 +651,7 @@ mod tests {
 
         assert_eq!(events.len(), 15);
         assert_eq!(authors.len(), 4);
-        assert!(events.iter().any(|event| event.tags == ["v0.1.0"]));
+        assert!(events.iter().any(|event| event.tags.as_slice() == ["v0.1.0"]));
     }
 
     #[test]
@@ -690,7 +690,7 @@ mod tests {
 
         let pixels = buffer_to_pixels(&buffer, 1, 1);
 
-        assert!(pixels.iter().any(|pixel| *pixel == (255, 255, 255)));
-        assert!(pixels.iter().any(|pixel| *pixel == (0, 0, 0)));
+        assert!(pixels.contains(&(255, 255, 255)));
+        assert!(pixels.contains(&(0, 0, 0)));
     }
 }
